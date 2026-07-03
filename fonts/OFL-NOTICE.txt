@@ -1,0 +1,15 @@
+The font files in this directory are bundled so that FolioPeek makes zero
+third-party network requests.
+
+- Fraunces — Copyright 2020 The Fraunces Project Authors
+  (https://github.com/undercasetype/Fraunces)
+- Spline Sans — Copyright 2021 The Spline Sans Project Authors
+  (https://github.com/SorkinType/SplineSans)
+- Spline Sans Mono — Copyright 2021 The Spline Sans Mono Project Authors
+  (https://github.com/SorkinType/SplineSansMono)
+
+All three families are licensed under the SIL Open Font License, Version 1.1,
+available with a FAQ at: https://openfontlicense.org
+
+These fonts are used and redistributed here unmodified (latin subset, woff2),
+under the terms of that license.

@@ -1,0 +1,17 @@
+# ── Personal data — NEVER commit ─────────────────────────────
+# These hold your real holdings and the tickers you track.
+ledger_backup.json
+ledger_backup.tmp
+backups/
+sector_cache.json
+
+# Internal strategy/working docs — not for the public repo
+GOING-PUBLIC.md
+PROPOSAL-continuous-server.md
+
+# Local tool state
+.claude/settings.local.json
+.DS_Store
+__pycache__/
+*.swp
+demo/

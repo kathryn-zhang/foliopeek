@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FolioPeek — Private Portfolio</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23211d16'/><text x='46' y='74' font-size='66' text-anchor='middle' fill='%23faf7f1' font-family='Georgia,serif'>F</text><circle cx='78' cy='70' r='7' fill='%231d6b45'/></svg>">
+<!-- Fonts are bundled locally (see fonts/OFL-NOTICE.txt): the page makes
+     zero third-party requests — no CDNs, no analytics, no telemetry. -->
+<link rel="stylesheet" href="fonts.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-left">
+    <h1 class="wordmark">FolioPeek<span class="wordmark-dot">.</span></h1>
+    <p class="tagline">A private record of holdings &amp; watchings</p>
+  </div>
+  <div class="masthead-right">
+    <div class="total-block">
+      <span class="total-label">Portfolio value</span>
+      <span class="total-value" id="totalValue">—</span>
+      <span class="total-change" id="totalChange"></span>
+    </div>
+    <div class="status-block">
+      <span class="market-dot" id="marketDot"></span>
+      <span id="marketState">…</span>
+      <span class="status-sep">·</span>
+      <span id="lastUpdated">loading</span>
+      <button class="btn-refresh" id="refreshBtn" title="Refresh quotes">↻</button>
+    </div>
+  </div>
+</header>
+
+<!-- ──────────────── Market indexes ──────────────── -->
+<section class="indexes" id="indexStrip" aria-label="Market indexes"></section>
+
+<!-- ──────────────── Tabs ──────────────── -->
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="holdings" role="tab"><span class="panel-num">I.</span> Holdings</button>
+  <button class="tab" data-tab="watchlist" role="tab"><span class="panel-num">II.</span> Watchlist</button>
+  <button class="tab" data-tab="distributions" role="tab"><span class="panel-num">III.</span> Overview</button>
+</nav>
+
+<!-- ──────────────── Portfolio ──────────────── -->
+<section class="panel" data-panel="holdings">
+  <div class="panel-toolbar">
+    <label class="btn btn-quiet" for="csvInput">Import CSV</label>
+    <input type="file" id="csvInput" accept=".csv,text/csv" hidden>
+    <button class="btn btn-quiet" id="exportBtn" title="Download holdings as CSV">Export</button>
+    <button class="btn btn-quiet btn-danger" id="clearBtn" title="Remove every holding">Clear all</button>
+  </div>
+
+  <div class="movers" id="moversStrip" aria-label="Today's biggest movers" hidden></div>
+
+  <table class="ledger-table" id="portfolioTable">
+    <thead>
+      <tr>
+        <th data-sort="symbol" class="sortable">Ticker</th>
+        <th data-sort="name" class="sortable">Name</th>
+        <th data-sort="sourceLabel" class="sortable">Source</th>
+        <th data-sort="price" class="sortable num">Price</th>
+        <th data-sort="changePct" class="sortable num">Day</th>
+        <th data-sort="dayGain" class="sortable num">Day's gain</th>
+        <th data-sort="shares" class="sortable num">Shares</th>
+        <th data-sort="cost" class="sortable num">Avg cost</th>
+        <th data-sort="value" class="sortable num">Value</th>
+        <th data-sort="gainPct" class="sortable num">Gain / loss</th>
+        <th data-sort="weight" class="sortable num">Weight</th>
+        <th class="actions-col"></th>
+      </tr>
+    </thead>
+    <tbody id="portfolioBody"></tbody>
+    <tfoot id="portfolioFoot"></tfoot>
+  </table>
+  <p class="empty-note" id="portfolioEmpty" hidden>No holdings yet — add a position below or import your broker's CSV export.</p>
+
+  <form class="add-row" id="addPositionForm" autocomplete="off">
+    <span class="add-row-label">Add position</span>
+    <input type="text" id="addSymbol" placeholder="Ticker e.g. AAPL" required spellcheck="false" maxlength="10">
+    <input type="number" id="addShares" placeholder="Shares" min="0.0001" step="any" required>
+    <input type="number" id="addCost" placeholder="Avg cost (optional)" min="0" step="any">
+    <select id="addSource" title="Source / account — imports of a source replace its rows; Manual rows are never touched by imports"></select>
+    <button class="btn btn-ink" type="submit" id="addPositionBtn">Add</button>
+    <span class="form-error" id="addError"></span>
+  </form>
+</section>
+
+<!-- ──────────────── Watchlist ──────────────── -->
+<section class="panel" data-panel="watchlist" hidden>
+  <p class="panel-sub-line">Interesting, but not owned — click ＋own when you buy one.</p>
+
+  <table class="ledger-table watch-table" id="watchTable">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Name</th>
+        <th class="num">Price</th>
+        <th class="num">Day</th>
+        <th class="range-col">52-week range</th>
+        <th class="actions-col"></th>
+      </tr>
+    </thead>
+    <tbody id="watchBody"></tbody>
+  </table>
+  <p class="empty-note" id="watchEmpty" hidden>Nothing on the radar. Add a ticker you're curious about.</p>
+
+  <form class="add-row" id="addWatchForm" autocomplete="off">
+    <span class="add-row-label">Watch ticker</span>
+    <input type="text" id="watchSymbol" placeholder="e.g. NVDA" required spellcheck="false" maxlength="10">
+    <button class="btn btn-ink" type="submit" id="addWatchBtn">Watch</button>
+    <span class="form-error" id="watchError"></span>
+  </form>
+</section>
+
+<!-- ──────────────── Distributions ──────────────── -->
+<section class="panel" data-panel="distributions" hidden>
+  <div class="dist-wrap">
+    <svg id="distChart" viewBox="0 0 240 240" width="270" height="270" role="img" aria-label="Portfolio distribution"></svg>
+    <div class="dist-legend" id="distLegend"></div>
+  </div>
+  <p class="dist-note" id="distNote">Categories follow Yahoo Finance's instrument type: mutual funds, index funds / ETFs, and individual stocks.</p>
+
+  <h3 class="dist-subhead">Stocks by sector</h3>
+  <div class="sector-bars" id="sectorBars"></div>
+  <p class="dist-note" id="sectorNote"></p>
+
+  <h3 class="dist-subhead">Value over time</h3>
+  <svg id="histChart" viewBox="0 0 720 200" role="img" aria-label="Portfolio value over time"></svg>
+  <p class="dist-note" id="histNote"></p>
+</section>
+
+<footer class="colophon">
+  <p>All holdings data lives in this browser's local storage — nothing is uploaded, no accounts, no bank connection. Quotes are fetched from Yahoo Finance through your own machine.</p>
+</footer>
+
+<!-- ──────────────── CSV review modal ──────────────── -->
+<div class="modal-backdrop" id="csvModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="csvModalTitle" tabindex="-1">
+    <h3 class="modal-title" id="csvModalTitle">Review import</h3>
+    <p class="modal-note">Only ticker, shares and average cost were read from the file — account numbers, balances and names were ignored and the file is not kept. Uncheck rows you don't want, edit anything that looks off.</p>
+    <div class="modal-scroll">
+      <table class="ledger-table review-table">
+        <thead>
+          <tr><th></th><th>Ticker</th><th class="num">Shares</th><th class="num">Avg cost</th></tr>
+        </thead>
+        <tbody id="csvReviewBody"></tbody>
+      </table>
+    </div>
+    <div class="modal-source">
+      <label for="csvSource">Source / account</label>
+      <select id="csvSource"></select>
+      <input type="text" id="csvSourceOther" placeholder="source name" maxlength="24" hidden>
+    </div>
+    <div class="modal-conflicts" id="csvConflicts" hidden>
+      <p class="conflict-head">These tickers also exist as Manual rows — combine or replace?</p>
+      <div id="csvConflictList"></div>
+    </div>
+    <div class="modal-mode">
+      <label><input type="radio" name="csvMode" value="source" checked> Add or refresh this source — other sources and manual rows are kept; shared tickers combine in the table</label>
+      <label><input type="radio" name="csvMode" value="replace"> Replace everything — start the whole table over with these rows</label>
+    </div>
+    <p class="modal-impact" id="csvImpact"></p>
+    <div class="modal-actions">
+      <button class="btn btn-quiet" id="csvCancel">Cancel</button>
+      <button class="btn btn-ink" id="csvApply">Apply to holdings</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
