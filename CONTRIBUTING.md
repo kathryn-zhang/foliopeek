@@ -12,6 +12,23 @@ python3 server.py
 That's the whole setup. Frontend is plain HTML/CSS/JS (no build step), the
 server is one dependency-free Python file.
 
+## Developing with fake data
+
+Never test against your real portfolio. Instead:
+
+```sh
+python3 scripts/make_demo.py     # generates demo/ with a 26-position fake portfolio
+python3 demo/server.py 8899     # isolated instance on its own port
+```
+
+The demo instance has its own backup file (inside `demo/`) and its own
+browser origin (different port), so it can't touch a real instance's data.
+It symlinks the frontend, so your code changes show up on reload. It also
+writes three broker-style CSVs (`demo/*.csv`) that exercise the import flow
+— lot aggregation, `BRK.B` normalization, cash-sweep and footer filtering —
+and match the seeded portfolio exactly. Screenshots in the README come from
+this instance.
+
 ## The most valuable contribution: broker CSV formats
 
 If your broker's positions export isn't recognized, open an issue with the
