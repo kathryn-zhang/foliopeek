@@ -63,8 +63,17 @@ function snapshotHistory() {
     const label = (DIST_CATS[quotes[r.sym]?.quoteType] || DIST_OTHER).label;
     cats[label] = (cats[label] || 0) + r.value;
   }
+  // Shares per source and the day's prices, so later snapshots can be diffed
+  // to tell new money (share changes) apart from market growth (price changes).
+  const pos = {};
+  for (const p of state.portfolio) {
+    const src = (pos[p.src] = pos[p.src] || {});
+    src[p.sym] = (src[p.sym] || 0) + p.shares;
+  }
+  const px = {};
+  for (const r of rows) if (r.price != null) px[r.sym] = r.price;
   const d = new Date().toISOString().slice(0, 10);
-  const entry = { d, total: Math.round(total * 100) / 100, cats };
+  const entry = { d, total: Math.round(total * 100) / 100, cats, pos, px };
   const i = valueHistory.findIndex((h) => h.d === d);
   if (i >= 0) valueHistory[i] = entry; else valueHistory.push(entry);
   localStorage.setItem("ledger.history.v1", JSON.stringify(valueHistory));
