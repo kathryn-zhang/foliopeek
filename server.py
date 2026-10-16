@@ -9,6 +9,7 @@ Usage:  python3 server.py  [port]
 """
 
 import json
+import re
 import sys
 import threading
 import time
@@ -25,6 +26,8 @@ ROOT = Path(__file__).resolve().parent
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=1d&interval=1d"
 YAHOO_HISTORY = ("https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
                  "?range=10y&interval=1mo")
+YAHOO_DAILY = ("https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+               "?period1={start}&period2={end}&interval=1d&events=split")
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 CACHE_TTL = 30  # seconds; be polite to Yahoo, quotes don't move faster than this matters
@@ -216,6 +219,48 @@ def fetch_history_return(symbol: str) -> dict:
     return out
 
 
+def fetch_factors(symbol: str, since: str) -> dict:
+    """Distribution factors and splits since a date, for telling growth from new money.
+
+    `factors` is adjclose/close per trading day, emitted only where it changes:
+    the ratio steps up across every dividend or fund capital-gain distribution
+    (Yahoo folds both into adjclose), so factor(b)/factor(a) is the payout
+    reinvested between two dates. `splits` are (date, ratio) pairs.
+    """
+    key = f"{symbol}@{since}"
+    now = time.time()
+    with _history_lock:
+        hit = _history.get(key)
+        if hit and now - hit[0] < HISTORY_TTL:
+            return hit[1]
+
+    try:
+        start = int(time.mktime(time.strptime(since, "%Y-%m-%d"))) - 7 * 86400
+        url = YAHOO_DAILY.format(sym=urllib.parse.quote(symbol), start=start, end=int(now) + 86400)
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.load(resp)["chart"]["result"][0]
+        day = lambda ts: time.strftime("%Y-%m-%d", time.gmtime(ts))  # noqa: E731
+        factors, last = [], None
+        for t, c, a in zip(result.get("timestamp") or [],
+                           result["indicators"]["quote"][0]["close"],
+                           result["indicators"]["adjclose"][0]["adjclose"]):
+            if not c or not a:
+                continue
+            f = round(a / c, 6)
+            if last is None or abs(f / last - 1) > 2e-5:  # skip float jitter between bars
+                factors.append([day(t), f])
+                last = f
+        splits = [[day(int(sp["date"])), sp["numerator"] / sp["denominator"]]
+                  for sp in (result.get("events", {}).get("splits") or {}).values()]
+        out = {"symbol": symbol, "factors": factors, "splits": sorted(splits)}
+    except Exception as exc:  # noqa: BLE001 - report per-symbol failure to the client
+        out = {"symbol": symbol, "error": str(exc)[:200]}
+    with _history_lock:
+        _history[key] = (now, out)
+    return out
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -241,6 +286,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.handle_symbols(parsed, fetch_profile)
         elif parsed.path == "/api/returns":
             self.handle_symbols(parsed, fetch_history_return)
+        elif parsed.path == "/api/factors":
+            since = urllib.parse.parse_qs(parsed.query).get("since", [""])[0]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+                self.send_json({"error": "since must be YYYY-MM-DD"}, status=400)
+                return
+            self.handle_symbols(parsed, lambda sym: fetch_factors(sym, since))
         elif parsed.path == "/api/backup":
             try:
                 body = BACKUP_FILE.read_bytes()

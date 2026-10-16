@@ -928,21 +928,133 @@ function renderSectorBars() {
 
 // ─────────────── Value over time ───────────────
 
+// Snapshots that carry share counts can be diffed to split each change in
+// value into new money (shares bought or sold) and market growth (price moves
+// on shares already held, plus dividends and fund distributions).
+// Brokerage cash is deliberately outside the portfolio: a sale whose proceeds
+// sit in cash counts as money taken out.
+
+// symbol → { factors: [[day, adjclose/close]], splits: [[day, ratio]] }
+let factorData = {};
+let factorsSince = null;
+let factorsLoading = false;
+let factorsFailed = false;
+
+async function ensureFactors(syms, since) {
+  if (since !== factorsSince) { factorData = {}; factorsSince = since; }
+  const missing = syms.filter((s) => !(s in factorData));
+  if (!missing.length || factorsLoading) return;
+  factorsLoading = true;
+  try {
+    const BATCH = 40;
+    for (let i = 0; i < missing.length; i += BATCH) {
+      const q = encodeURIComponent(missing.slice(i, i + BATCH).join(","));
+      const res = await fetch(`/api/factors?since=${since}&symbols=${q}`);
+      if (!res.ok) throw new Error(`factor server returned ${res.status}`);
+      for (const r of (await res.json()).quotes || []) factorData[r.symbol] = r;
+    }
+  } catch {
+    factorsFailed = true;
+    for (const s of missing) factorData[s] = factorData[s] || { error: "unavailable" };
+  } finally {
+    factorsLoading = false;
+  }
+}
+
+function factorOn(sym, d) {
+  const f = factorData[sym]?.factors;
+  if (!f?.length) return 1;
+  let v = f[0][1];
+  for (const [day, x] of f) { if (day <= d) v = x; else break; }
+  return v;
+}
+
+function splitBetween(sym, a, b) {
+  return (factorData[sym]?.splits || [])
+    .reduce((m, [day, r]) => (day > a && day <= b ? m * r : m), 1);
+}
+
+function sharesBySym(pos) {
+  const out = {};
+  for (const src of Object.values(pos)) {
+    for (const [sym, q] of Object.entries(src)) out[sym] = (out[sym] || 0) + q;
+  }
+  return out;
+}
+
+// One point per snapshot with share counts: value, net invested (value on the
+// first tracked day plus net new money since), cumulative growth, and the
+// time-weighted return, which ignores when money came in or out.
+function flowSeries(snaps) {
+  const first = sharesBySym(snaps[0].pos);
+  // Last known price per symbol: a day without a quote holds the prior price.
+  const lastPx = { ...snaps[0].px };
+  let value = Object.entries(first).reduce((s, [sym, q]) => s + q * (lastPx[sym] ?? 0), 0);
+  // Anchor to each snapshot's recorded total so the chart's gap between value
+  // and net invested is exactly the cumulative growth.
+  let growth = 0, twr = 1;
+  const at = (snap, v) => snap.total ?? v;
+  const out = [{ d: snaps[0].d, value: at(snaps[0], value), invested: at(snaps[0], value), growth, twr: 0 }];
+  for (let k = 1; k < snaps.length; k++) {
+    const a = snaps[k - 1], b = snaps[k];
+    const qa = sharesBySym(a.pos), qb = sharesBySym(b.pos);
+    let dV = 0, g = 0, va = 0;
+    for (const sym of new Set([...Object.keys(qa), ...Object.keys(qb)])) {
+      // No quote yet for a new symbol: treat it as bought at today's price.
+      const pb = b.px[sym] ?? lastPx[sym], pa = lastPx[sym] ?? pb;
+      if (pa == null) continue;
+      lastPx[sym] = pb;
+      const s = splitBetween(sym, a.d, b.d);
+      const sharesA = (qa[sym] || 0) * s;
+      const dist = factorOn(sym, b.d) / factorOn(sym, a.d);
+      g += sharesA * (pb * dist - pa / s);
+      dV += (qb[sym] || 0) * pb - (qa[sym] || 0) * pa;
+      va += (qa[sym] || 0) * pa;
+    }
+    value += dV;
+    growth += g;
+    if (va > 0) twr *= 1 + g / va;
+    out.push({ d: b.d, value: at(b, value), invested: at(b, value) - growth, growth, twr: twr - 1 });
+  }
+  return out;
+}
+
 function renderHistoryChart() {
   const svg = document.getElementById("histChart");
   const note = document.getElementById("histNote");
+  const legend = document.getElementById("histLegend");
   const pts = valueHistory.slice().sort((a, b) => (a.d < b.d ? -1 : 1));
   if (pts.length < 2) {
     svg.innerHTML = "";
     svg.style.display = "none";
+    legend.hidden = true;
     note.textContent = "History starts today — a snapshot of your total value is kept for each day you open the page, and the chart appears once there are two.";
     return;
   }
   svg.style.display = "";
-  const W = 720, H = 200, padL = 12, padR = 84, padT = 16, padB = 28;
+
+  // Net invested needs share counts on both ends and the distribution factors.
+  const snaps = pts.filter((p) => p.pos && p.px);
+  let flows = null;
+  if (snaps.length >= 2) {
+    const syms = [...new Set(snaps.flatMap((p) => Object.keys(sharesBySym(p.pos))))];
+    if (snaps[0].d === factorsSince && syms.every((s) => s in factorData)) {
+      flows = flowSeries(snaps);
+    } else if (!factorsLoading) {
+      ensureFactors(syms, snaps[0].d).then(() => {
+        if (!document.querySelector("[data-panel=distributions]").hidden) renderHistoryChart();
+      });
+    }
+  }
+
+  const avail = svg.getBoundingClientRect().width - 20;
+  const W = Math.round(Math.min(720, Math.max(320, avail > 0 ? avail : 720)));
+  const H = 200, padL = 12, padR = 84, padT = 16, padB = 36;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   const t0 = Date.parse(pts[0].d), t1 = Date.parse(pts[pts.length - 1].d);
-  let lo = Math.min(...pts.map((p) => p.total));
-  let hi = Math.max(...pts.map((p) => p.total));
+  const vals = pts.map((p) => p.total).concat(flows ? flows.map((f) => f.invested) : []);
+  let lo = Math.min(...vals);
+  let hi = Math.max(...vals);
   if (hi === lo) { hi *= 1.005; lo *= 0.995; }
   const X = (t) => padL + ((t - t0) / (t1 - t0)) * (W - padL - padR);
   const Y = (v) => padT + ((hi - v) / (hi - lo)) * (H - padT - padB);
@@ -951,9 +1063,26 @@ function renderHistoryChart() {
   const last = pts[pts.length - 1];
   const fmtD = (d) => new Date(d + "T12:00").toLocaleDateString([], { month: "short", day: "numeric" });
 
+  // Shade the gap between value and net invested: that gap is market growth.
+  let overlay = "";
+  if (flows) {
+    const fx = (f) => X(Date.parse(f.d)).toFixed(1);
+    const top = flows.map((f, i) => `${i ? "L" : "M"} ${fx(f)} ${Y(f.value).toFixed(1)}`).join(" ");
+    const back = flows.slice().reverse().map((f) => `L ${fx(f)} ${Y(f.invested).toFixed(1)}`).join(" ");
+    const endF = flows[flows.length - 1];
+    let yInv = Y(endF.invested) + 4;
+    if (Math.abs(yInv - (Y(last.total) + 4)) < 15) yInv = Y(last.total) + 4 + (endF.growth >= 0 ? 15 : -15);
+    overlay = `
+      <path d="${top} ${back} Z" fill="var(${endF.growth >= 0 ? "--gain" : "--loss"})" fill-opacity="0.12"/>
+      <path d="${flows.map((f, i) => `${i ? "L" : "M"} ${fx(f)} ${Y(f.invested).toFixed(1)}`).join(" ")}"
+        fill="none" stroke="var(--ink-soft)" stroke-width="2" stroke-linejoin="round"/>
+      <text x="${X(t1) + 9}" y="${yInv}" class="hist-label">${moneyBig(endF.invested)}</text>`;
+  }
+
   svg.innerHTML = `
     <line x1="${padL}" y1="${Y(hi)}" x2="${W - padR}" y2="${Y(hi)}" class="hist-grid"/>
     <line x1="${padL}" y1="${Y(lo)}" x2="${W - padR}" y2="${Y(lo)}" class="hist-grid"/>
+    ${overlay}
     <path d="${path}" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round"/>
     <circle cx="${X(t1).toFixed(1)}" cy="${Y(last.total).toFixed(1)}" r="3.5" fill="var(--gain)"/>
     <text x="${X(t1) + 9}" y="${Y(last.total) + 4}" class="hist-label-strong">${moneyBig(last.total)}</text>
@@ -961,11 +1090,26 @@ function renderHistoryChart() {
     <text x="${padL + 4}" y="${Y(lo) + 15}" class="hist-label">${moneyBig(lo)}</text>
     <text x="${padL}" y="${H - 2}" class="hist-label">${fmtD(pts[0].d)}</text>
     <text x="${W - padR}" y="${H - 2}" text-anchor="end" class="hist-label">${fmtD(last.d)}</text>`;
+  legend.hidden = !flows;
 
-  const delta = last.total - pts[0].total;
-  note.textContent = `${pts.length} daily snapshots since ${fmtD(pts[0].d)} — `
-    + `${delta >= 0 ? "up" : "down"} ${moneyBig(Math.abs(delta))} (${((delta / pts[0].total) * 100).toFixed(1)}%) over that span. `
-    + "A snapshot is kept for each day the page is opened.";
+  let text = `${pts.length} daily snapshots since ${fmtD(pts[0].d)}. `;
+  if (flows) {
+    const f = flows[flows.length - 1];
+    const newMoney = f.invested - flows[0].invested;
+    const sign = (v) => (v >= 0 ? "+" : "−");
+    text += `${flows[0].d === pts[0].d ? "Over that span" : `Since ${fmtD(flows[0].d)}`}: market growth ${sign(f.growth)}${moneyBig(Math.abs(f.growth))}`
+      + ` (${sign(f.twr)}${Math.abs(f.twr * 100).toFixed(1)}% time-weighted, which ignores when money moved), `
+      + `net new money ${sign(newMoney)}${moneyBig(Math.abs(newMoney))}. `
+      + "Buys count as money in and sales as money out — brokerage cash isn't tracked. Dividends and fund distributions count as growth, reinvested or not."
+      + (factorsFailed ? " Dividend data couldn't be fetched, so recent payouts may show as new money." : "");
+    if (snaps[0].d !== pts[0].d) text += ` Earlier snapshots predate share tracking, so net invested starts ${fmtD(snaps[0].d)}.`;
+  } else {
+    const delta = last.total - pts[0].total;
+    text += `${delta >= 0 ? "Up" : "Down"} ${moneyBig(Math.abs(delta))} (${((delta / pts[0].total) * 100).toFixed(1)}%) over that span, counting any money added or withdrawn. `
+      + (snaps.length >= 2 ? "Separating new money from growth…"
+        : "From the next snapshot on, new money will be shown separately from market growth.");
+  }
+  note.textContent = text;
 }
 
 // ─────────────── Compound growth projection ───────────────
@@ -1436,7 +1580,9 @@ function wire() {
   window.addEventListener("resize", () => {
     clearTimeout(projResize);
     projResize = setTimeout(() => {
-      if (!document.querySelector("[data-panel=distributions]").hidden) renderProjection();
+      if (document.querySelector("[data-panel=distributions]").hidden) return;
+      renderHistoryChart();
+      renderProjection();
     }, 150);
   });
   projSvg.addEventListener("blur", hideProjHover);
