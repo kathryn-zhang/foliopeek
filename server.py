@@ -23,11 +23,18 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8742
 ROOT = Path(__file__).resolve().parent
 
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=1d&interval=1d"
+YAHOO_HISTORY = ("https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+                 "?range=10y&interval=1mo")
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 CACHE_TTL = 30  # seconds; be polite to Yahoo, quotes don't move faster than this matters
 _cache: dict[str, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
+
+# Long-run returns move slowly; a few hours of caching keeps Overview cheap.
+HISTORY_TTL = 6 * 3600
+_history: dict[str, tuple[float, dict]] = {}
+_history_lock = threading.Lock()
 
 # The browser's localStorage is the primary store but fragile (clearing site
 # data wipes it); the frontend mirrors every change here so it can be restored.
@@ -181,6 +188,34 @@ def fetch_quote(symbol: str) -> dict:
     return quote
 
 
+def fetch_history_return(symbol: str) -> dict:
+    """Annualized total return over up to 10 years of monthly dividend-adjusted closes."""
+    now = time.time()
+    with _history_lock:
+        hit = _history.get(symbol)
+        if hit and now - hit[0] < HISTORY_TTL:
+            return hit[1]
+
+    url = YAHOO_HISTORY.format(sym=urllib.parse.quote(symbol))
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.load(resp)["chart"]["result"][0]
+        points = [(t, c) for t, c in zip(result["timestamp"],
+                                         result["indicators"]["adjclose"][0]["adjclose"])
+                  if c]
+        (t0, c0), (t1, c1) = points[0], points[-1]
+        years = (t1 - t0) / (365.25 * 86400)
+        # Under three years is too short to call a long-run return.
+        cagr = (c1 / c0) ** (1 / years) - 1 if years >= 3 else None
+        out = {"symbol": symbol, "cagr": cagr, "years": round(years, 1)}
+    except Exception as exc:  # noqa: BLE001 - report per-symbol failure to the client
+        out = {"symbol": symbol, "error": str(exc)[:200]}
+    with _history_lock:
+        _history[symbol] = (now, out)
+    return out
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -204,6 +239,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.handle_symbols(parsed, fetch_quote)
         elif parsed.path == "/api/sectors":
             self.handle_symbols(parsed, fetch_profile)
+        elif parsed.path == "/api/returns":
+            self.handle_symbols(parsed, fetch_history_return)
         elif parsed.path == "/api/backup":
             try:
                 body = BACKUP_FILE.read_bytes()

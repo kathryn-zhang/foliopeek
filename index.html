@@ -129,6 +129,43 @@
   <h3 class="dist-subhead">Value over time</h3>
   <svg id="histChart" viewBox="0 0 720 200" role="img" aria-label="Portfolio value over time"></svg>
   <p class="dist-note" id="histNote"></p>
+
+  <h3 class="dist-subhead">Compound growth</h3>
+  <div class="proj-controls">
+    <label class="proj-field">Add each month
+      <span class="proj-money"><input id="projMonthly" type="number" min="0" step="50" inputmode="decimal"></span>
+    </label>
+    <label class="proj-field">For
+      <select id="projYears">
+        <option value="10">10 years</option>
+        <option value="20">20 years</option>
+        <option value="30">30 years</option>
+        <option value="40">40 years</option>
+      </select>
+    </label>
+    <div class="proj-field">Growing at
+      <div class="proj-rates" role="radiogroup" aria-label="Annual return">
+        <button type="button" class="proj-rate" data-preset="4" role="radio">4% cautious</button>
+        <button type="button" class="proj-rate" data-preset="7" role="radio">7% typical</button>
+        <button type="button" class="proj-rate" data-preset="mix" role="radio" disabled>Your mix …</button>
+        <span class="proj-custom"><input id="projRate" type="number" min="0" max="30" step="0.5" inputmode="decimal" aria-label="Custom annual return">%</span>
+      </div>
+    </div>
+  </div>
+  <p class="proj-hero" id="projHero"></p>
+  <div class="proj-chart-wrap">
+    <svg id="projChart" viewBox="0 0 720 240" role="img" aria-label="Projected portfolio value" tabindex="0"></svg>
+    <div class="proj-tip" id="projTip" hidden></div>
+  </div>
+  <div class="proj-legend">
+    <span><i class="proj-key proj-key-in"></i>Today's value + what you add</span>
+    <span><i class="proj-key proj-key-growth"></i>Growth from compounding</span>
+  </div>
+  <details class="proj-details">
+    <summary>Show as a table</summary>
+    <table class="proj-table" id="projTable"></table>
+  </details>
+  <p class="dist-note" id="projNote"></p>
 </section>
 
 <footer class="colophon">

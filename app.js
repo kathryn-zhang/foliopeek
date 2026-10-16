@@ -813,6 +813,7 @@ function renderDistributions() {
   if (!list.length) {
     svg.innerHTML = "";
     legend.innerHTML = `<p class="empty-note" style="border:none">Nothing to chart yet — add holdings and refresh quotes first.</p>`;
+    renderProjection();
     return;
   }
 
@@ -850,6 +851,7 @@ function renderDistributions() {
 
   renderSectorBars();
   renderHistoryChart();
+  renderProjection();
 }
 
 // ─────────────── Stocks by sector ───────────────
@@ -964,6 +966,247 @@ function renderHistoryChart() {
   note.textContent = `${pts.length} daily snapshots since ${fmtD(pts[0].d)} — `
     + `${delta >= 0 ? "up" : "down"} ${moneyBig(Math.abs(delta))} (${((delta / pts[0].total) * 100).toFixed(1)}%) over that span. `
     + "A snapshot is kept for each day the page is opened.";
+}
+
+// ─────────────── Compound growth projection ───────────────
+// Stateless: always projects forward from today's total, so imports and edits
+// simply move the starting point. Only the inputs are remembered.
+
+const PROJ_KEY = "ledger.projection.v1";
+let proj = { monthly: 0, years: 20, preset: "7", rate: 7 };
+try { proj = { ...proj, ...JSON.parse(localStorage.getItem(PROJ_KEY)) }; } catch { /* defaults */ }
+let projSeries = [];
+
+// symbol → { cagr, years } from /api/returns; fetched once per page load.
+const histReturns = {};
+let returnsLoading = false;
+
+async function ensureReturns(syms) {
+  const missing = syms.filter((s) => !(s in histReturns));
+  if (!missing.length || returnsLoading) return;
+  returnsLoading = true;
+  try {
+    const BATCH = 40;
+    for (let i = 0; i < missing.length; i += BATCH) {
+      const res = await fetch(`/api/returns?symbols=${encodeURIComponent(missing.slice(i, i + BATCH).join(","))}`);
+      if (!res.ok) return;
+      for (const r of (await res.json()).quotes || []) histReturns[r.symbol] = r;
+    }
+  } finally {
+    returnsLoading = false;
+  }
+}
+
+// Value-weighted average of each holding's 10-year annual return, over the
+// holdings that have one; `coverage` is the share of portfolio value counted.
+function mixReturn() {
+  const { rows, total } = portfolioRows();
+  let weighted = 0, covered = 0;
+  for (const r of rows) {
+    const h = histReturns[r.sym];
+    if (r.value == null || h?.cagr == null) continue;
+    weighted += h.cagr * r.value;
+    covered += r.value;
+  }
+  return covered ? { rate: (weighted / covered) * 100, coverage: covered / total } : null;
+}
+
+function saveProj() {
+  try { localStorage.setItem(PROJ_KEY, JSON.stringify(proj)); } catch { /* not critical */ }
+}
+
+function projectGrowth(start, monthly, ratePct, years) {
+  // Monthly compounding at the equivalent of the annual rate, contributions
+  // added at each month's end. One point per month from today.
+  const rm = Math.pow(1 + ratePct / 100, 1 / 12) - 1;
+  const pts = [{ m: 0, total: start, putIn: start }];
+  let total = start, putIn = start;
+  for (let m = 1; m <= years * 12; m++) {
+    total = total * (1 + rm) + monthly;
+    putIn += monthly;
+    pts.push({ m, total, putIn });
+  }
+  return pts;
+}
+
+function renderProjection() {
+  const svg = document.getElementById("projChart");
+  const hero = document.getElementById("projHero");
+  const note = document.getElementById("projNote");
+  const table = document.getElementById("projTable");
+  const { rows, total } = portfolioRows();
+
+  const mix = mixReturn();
+  const pending = rows.some((r) => !(r.sym in histReturns));
+  const mixBtn = document.querySelector('.proj-rate[data-preset="mix"]');
+  mixBtn.disabled = !mix;
+  mixBtn.textContent = mix ? `${mix.rate.toFixed(1)}% your mix` : (pending ? "Your mix …" : "Your mix —");
+  if (proj.preset === "mix" && mix) proj.rate = Math.round(mix.rate * 10) / 10;
+  if (proj.preset === "mix" && !mix && !pending) proj.preset = "custom";
+  document.querySelectorAll(".proj-rate").forEach((b) =>
+    b.setAttribute("aria-checked", String(b.dataset.preset === proj.preset)));
+  document.getElementById("projMonthly").value = proj.monthly || "";
+  document.getElementById("projYears").value = String(proj.years);
+  const rateInput = document.getElementById("projRate");
+  if (document.activeElement !== rateInput) rateInput.value = proj.rate;
+
+  if (!total) {
+    svg.innerHTML = "";
+    svg.style.display = "none";
+    hero.textContent = "";
+    table.innerHTML = "";
+    note.textContent = "Add holdings and refresh quotes to project their growth.";
+    return;
+  }
+  svg.style.display = "";
+
+  const pts = projectGrowth(total, proj.monthly, proj.rate, proj.years);
+  projSeries = pts;
+  const end = pts[pts.length - 1];
+  const growth = end.total - end.putIn;
+  const year0 = new Date().getFullYear();
+
+  hero.innerHTML = "";
+  const strong = document.createElement("strong");
+  strong.textContent = fmtUSD0.format(end.total);
+  hero.append(`In ${proj.years} years (${year0 + proj.years}), at ${proj.rate}% a year`, strong,
+    `${fmtUSD0.format(end.putIn)} is ${proj.monthly ? "today's value plus what you add" : "today's value"}`
+    + ` · ${fmtUSD0.format(Math.max(growth, 0))} is new growth`
+    + (end.total > 0 ? ` (${Math.round((Math.max(growth, 0) / end.total) * 100)}% of the total)` : ""));
+
+  // Chart geometry
+  // Size the viewBox to the rendered width so labels stay legible on phones.
+  const avail = svg.getBoundingClientRect().width - 20;
+  const W = Math.round(Math.min(720, Math.max(320, avail > 0 ? avail : 720)));
+  const H = 240, padL = 56, padR = W < 500 ? 84 : 112, padT = 14, padB = 26;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const months = proj.years * 12;
+  const step = niceStep(end.total / 4);
+  const hi = Math.ceil(end.total / step) * step || 1;
+  const X = (m) => padL + (m / months) * (W - padL - padR);
+  const Y = (v) => padT + (1 - v / hi) * (H - padT - padB);
+  const line = (key) => pts.map((p, i) => `${i ? "L" : "M"}${X(p.m).toFixed(1)} ${Y(p[key]).toFixed(1)}`).join("");
+  const base = `L${X(months).toFixed(1)} ${Y(0)} L${X(0)} ${Y(0)}Z`;
+  const back = (key) => pts.slice().reverse().map((p) => `L${X(p.m).toFixed(1)} ${Y(p[key]).toFixed(1)}`).join("");
+
+  let grid = "";
+  for (let v = 0; v <= hi + 1e-6; v += step) {
+    grid += `<line x1="${padL}" y1="${Y(v)}" x2="${W - padR}" y2="${Y(v)}" class="hist-grid"/>
+      <text x="${padL - 8}" y="${Y(v) + 4}" text-anchor="end" class="hist-label">${compactUSD(v)}</text>`;
+  }
+  const tickEvery = (proj.years <= 10 ? 2 : proj.years <= 20 ? 5 : 10) * (W < 500 && proj.years > 10 ? 2 : 1);
+  let ticks = "";
+  const tickYears = [];
+  for (let y = 0; y <= proj.years; y += tickEvery) tickYears.push(y);
+  if (tickYears[tickYears.length - 1] !== proj.years) tickYears.push(proj.years);
+  for (const y of tickYears) {
+    ticks += `<text x="${X(y * 12)}" y="${H - 6}" text-anchor="middle" class="hist-label">${y ? year0 + y : "Now"}</text>`;
+  }
+
+  // Direct labels at the right edge; nudge apart when the two ends crowd.
+  let yTotal = Y(end.total) + 4, yIn = Y(end.putIn) + 4;
+  if (yIn - yTotal < 16) yIn = yTotal + 16;
+  svg.innerHTML = `${grid}${ticks}
+    <path d="${line("putIn")}${base}" class="proj-area-in"/>
+    <path d="${line("total")}${back("putIn")}Z" class="proj-area-growth"/>
+    <path d="${line("putIn")}" class="proj-line-in"/>
+    <path d="${line("total")}" class="proj-line-total"/>
+    <text x="${X(months) + 9}" y="${yTotal}" class="hist-label-strong">${compactUSD(end.total)}</text>
+    <text x="${X(months) + 9}" y="${yIn}" class="hist-label">${compactUSD(end.putIn)}${W < 500 ? "" : proj.monthly ? " + adds" : " today"}</text>
+    <g id="projHover" visibility="hidden">
+      <line class="proj-cross" y1="${padT}" y2="${Y(0)}"/>
+      <circle r="4" fill="var(--gain)" stroke="var(--paper)" stroke-width="2"/>
+      <circle r="4" fill="var(--ink-soft)" stroke="var(--paper)" stroke-width="2"/>
+    </g>
+    <rect x="${padL}" y="0" width="${W - padL - padR}" height="${H}" fill="transparent" id="projHit"/>`;
+  svg.dataset.geom = JSON.stringify({ W, padL, padR, months, hi, padT, padB, H });
+
+  // Table view: every tick year, so every value is reachable without hovering.
+  table.innerHTML = `<tr><th>Year</th><th>Today + adds</th><th>Growth</th><th>Total</th></tr>`
+    + pts.filter((p) => p.m % (tickEvery * 12) === 0 || p.m === months)
+      .filter((p, i, a) => a.findIndex((q) => q.m === p.m) === i)
+      .map((p) => `<tr><td>${p.m ? year0 + p.m / 12 : "Now"}</td><td>${fmtUSD0.format(p.putIn)}</td>
+        <td>${fmtUSD0.format(p.total - p.putIn)}</td><td>${fmtUSD0.format(p.total)}</td></tr>`).join("");
+
+  let text = `Assumes a steady ${proj.rate}% a year, compounded monthly, with contributions added at each month's end. `
+    + "Real returns swing from year to year, and these figures are before inflation and taxes. ";
+  if (mix) {
+    text += `"Your mix" is the value-weighted 10-year annual return (dividends reinvested) of what you hold today`
+      + (mix.coverage < 0.98 ? `, covering ${Math.round(mix.coverage * 100)}% of your portfolio` : "")
+      + " — hindsight flatters it, since today's holdings are partly the ones that already did well.";
+    if (mix.rate > 10) text += " Over 10% a year has rarely held up for decades; treat it as an optimistic case.";
+  }
+  note.textContent = text;
+
+  if (pending) {
+    ensureReturns(rows.map((r) => r.sym)).then(() => {
+      if (!document.querySelector("[data-panel=distributions]").hidden) renderProjection();
+    });
+  }
+}
+
+function niceStep(raw) {
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  return [1, 2, 2.5, 5, 10].map((f) => f * mag).find((s) => s >= raw);
+}
+
+function compactUSD(v) {
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(v >= 1e7 ? 0 : 1)}M`;
+  if (v >= 1e3) return `$${Math.round(v / 1e3)}k`;
+  return `$${Math.round(v)}`;
+}
+
+function showProjHover(m) {
+  const svg = document.getElementById("projChart");
+  const tip = document.getElementById("projTip");
+  const g = JSON.parse(svg.dataset.geom || "null");
+  const p = projSeries[m];
+  if (!g || !p) return;
+  const X = (mm) => g.padL + (mm / g.months) * (g.W - g.padL - g.padR);
+  const Y = (v) => g.padT + (1 - v / g.hi) * (g.H - g.padT - g.padB);
+  const hover = svg.querySelector("#projHover");
+  hover.setAttribute("visibility", "visible");
+  hover.querySelector("line").setAttribute("x1", X(m));
+  hover.querySelector("line").setAttribute("x2", X(m));
+  const [dotTotal, dotIn] = hover.querySelectorAll("circle");
+  dotTotal.setAttribute("cx", X(m)); dotTotal.setAttribute("cy", Y(p.total));
+  dotIn.setAttribute("cx", X(m)); dotIn.setAttribute("cy", Y(p.putIn));
+
+  const when = new Date();
+  when.setMonth(when.getMonth() + m);
+  tip.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "proj-tip-head";
+  head.textContent = m ? when.toLocaleDateString([], { month: "short", year: "numeric" }) : "Today";
+  tip.append(head);
+  for (const [label, val, color] of [["Total", p.total, "var(--gain)"],
+    ["Today + adds", p.putIn, "var(--ink-soft)"], ["Growth", p.total - p.putIn, null]]) {
+    const row = document.createElement("div");
+    row.className = "proj-tip-row";
+    const key = document.createElement("i");
+    key.className = "proj-tip-key";
+    if (color) key.style.background = color;
+    const b = document.createElement("b");
+    b.textContent = fmtUSD0.format(val);
+    row.append(key, b, label);
+    tip.append(row);
+  }
+  tip.hidden = false;
+  // Position in CSS pixels: flip to the left of the crosshair past the midpoint.
+  const px = projPad(svg).left + X(m) * projPad(svg).scale;
+  tip.style.left = m > g.months / 2 ? `${px - tip.offsetWidth - 12}px` : `${px + 12}px`;
+}
+
+// The SVG has CSS padding; map between viewBox units and its content box.
+function projPad(svg) {
+  const cs = getComputedStyle(svg);
+  const left = parseFloat(cs.paddingLeft), right = parseFloat(cs.paddingRight);
+  return { left, scale: (svg.getBoundingClientRect().width - left - right) / svg.viewBox.baseVal.width };
+}
+
+function hideProjHover() {
+  document.getElementById("projTip").hidden = true;
+  document.getElementById("projHover")?.setAttribute("visibility", "hidden");
 }
 
 // ───────────────────────── Tabs ─────────────────────────
@@ -1155,6 +1398,57 @@ function wire() {
   });
 
   document.getElementById("exportBtn").addEventListener("click", exportCSV);
+
+  // Compound growth inputs
+  document.getElementById("projMonthly").addEventListener("input", (e) => {
+    proj.monthly = Math.max(0, Number(e.target.value) || 0);
+    saveProj(); renderProjection();
+  });
+  document.getElementById("projYears").addEventListener("change", (e) => {
+    proj.years = Number(e.target.value) || 20;
+    saveProj(); renderProjection();
+  });
+  document.querySelectorAll(".proj-rate").forEach((b) => b.addEventListener("click", () => {
+    proj.preset = b.dataset.preset;
+    if (proj.preset !== "mix") proj.rate = Number(proj.preset);
+    saveProj(); renderProjection();
+  }));
+  document.getElementById("projRate").addEventListener("input", (e) => {
+    const v = Number(e.target.value);
+    if (e.target.value === "" || !(v >= 0 && v <= 30)) return;
+    proj.preset = "custom";
+    proj.rate = v;
+    saveProj(); renderProjection();
+  });
+  const projSvg = document.getElementById("projChart");
+  let projM = null;
+  projSvg.addEventListener("pointermove", (e) => {
+    const g = JSON.parse(projSvg.dataset.geom || "null");
+    if (!g) return;
+    const { left, scale } = projPad(projSvg);
+    const x = (e.clientX - projSvg.getBoundingClientRect().left - left) / scale;
+    const m = Math.round(((x - g.padL) / (g.W - g.padL - g.padR)) * g.months);
+    projM = Math.min(g.months, Math.max(0, m));
+    showProjHover(projM);
+  });
+  projSvg.addEventListener("pointerleave", hideProjHover);
+  let projResize;
+  window.addEventListener("resize", () => {
+    clearTimeout(projResize);
+    projResize = setTimeout(() => {
+      if (!document.querySelector("[data-panel=distributions]").hidden) renderProjection();
+    }, 150);
+  });
+  projSvg.addEventListener("blur", hideProjHover);
+  // Keyboard: arrows step a year at a time, matching the hover readout.
+  projSvg.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const months = proj.years * 12;
+    projM = projM == null ? 0 : projM - (projM % 12) + (e.key === "ArrowRight" ? 12 : (projM % 12 ? 0 : -12));
+    projM = Math.min(months, Math.max(0, projM));
+    showProjHover(projM);
+  });
 
   document.getElementById("clearBtn").addEventListener("click", () => {
     const n = state.portfolio.length;
